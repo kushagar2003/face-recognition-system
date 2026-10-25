@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capture - Face Recognition Attendance</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5b6474;
+      --accent: #2556d6; --ok: #17794a; --warn: #8a5a00; --bad: #b42318; --border: #d9dde5;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #12151b; --card: #1b2028; --text: #e8ebf0; --muted: #9aa3b2;
+        --accent: #7aa2ff; --ok: #4cd08f; --warn: #f5c26b; --bad: #ff8a80; --border: #2e3644;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #12151b; --card: #1b2028; --text: #e8ebf0; --muted: #9aa3b2;
+      --accent: #7aa2ff; --ok: #4cd08f; --warn: #f5c26b; --bad: #ff8a80; --border: #2e3644;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5;
+    }
+    main { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    h2 { font-size: 1.1rem; margin: 0 0 12px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+      padding: 16px; margin: 16px 0;
+    }
+    .muted { color: var(--muted); font-size: 0.92rem; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+    label { display: flex; flex-direction: column; font-size: 0.9rem; gap: 4px; flex: 1 1 200px; }
+    input {
+      font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--text); min-height: 40px;
+    }
+    button {
+      font: inherit; padding: 8px 16px; min-height: 40px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    }
+    button.secondary { background: transparent; color: var(--accent); }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    #message { margin: 12px 0 0; min-height: 1.5em; font-weight: 600; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 12px 0 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .row-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Take a photo</h1>
+  <p class="muted">
+    Only capture a person who has agreed to it. Every capture is saved with its roll number,
+    even when no face is found, so it can be reviewed.
+  </p>
+  <p id="db-status" class="muted">Checking the database...</p>
+
+  <section class="card" aria-labelledby="capture-title">
+    <h2 id="capture-title">New capture</h2>
+    <form id="capture-form">
+      <label>
+        Roll number
+        <input id="roll" name="roll" maxlength="32" required autocomplete="off"
+               pattern="[A-Za-z0-9_\-]{1,32}"
+               title="Letters, digits, '-' and '_' only (up to 32 characters)">
+      </label>
+      <button id="capture-btn" type="submit">Take photo</button>
+    </form>
+    <p id="message" role="status" aria-live="polite"></p>
+    <div id="result" hidden>
+      <dl id="result-list"></dl>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="list-title">
+    <div class="row-actions">
+      <h2 id="list-title">Recent captures</h2>
+      <button id="refresh-btn" type="button" class="secondary">Refresh list</button>
+    </div>
+    <p id="list-caption" class="muted"></p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Roll number</th><th>Faces</th><th>Result</th><th>Photo file</th></tr>
+        </thead>
+        <tbody id="captures-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+  const ROLL_RE = /^[A-Za-z0-9_-]{1,32}$/;
+  const LABELS = {
+    one_face: "One face found",
+    no_face: "No face found",
+    multiple_faces: "Several faces found",
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  // Calls the API and turns any error into an Error with a readable message.
+  async function api(path, options) {
+    let response;
+    try {
+      response = await fetch(path, options);
+    } catch {
+      throw new Error("Cannot reach the server. Check that it is still running.");
+    }
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      // The response was not JSON; the status code is used below.
+    }
+    if (!response.ok) {
+      const message = data && data.error ? data.error.message
+        : `Request failed (HTTP ${response.status}).`;
+      throw new Error(message);
+    }
+    return data;
+  }
+
+  function setMessage(text, kind) {
+    const el = $("message");
+    el.textContent = text;
+    el.className = kind || "";
+  }
+
+  function formatTime(iso) {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+  }
+
+  async function checkDatabase() {
+    const el = $("db-status");
+    try {
+      await api("/api/health/ready");
+      el.textContent = "Database: connected.";
+      el.className = "ok";
+    } catch (error) {
+      el.textContent = "Database: not connected. " + error.message;
+      el.className = "bad";
+    }
+  }
+
+  function showResult(r) {
+    const rows = [
+      ["Roll number", r.roll_number],
+      ["Result", LABELS[r.status] || r.status],
+      ["Faces", String(r.face_count)],
+      ["Time", formatTime(r.captured_at)],
+      ["Photo file", r.image_path],
+      ["Database", r.database_saved ? "Record saved" : "NOT saved: " + (r.database_message || "")],
+    ];
+    if (r.face) {
+      rows.push(["Face size", `${r.face.width} x ${r.face.height} px, confidence ${r.face.confidence.toFixed(2)}`]);
+    }
+    const list = $("result-list");
+    list.replaceChildren();
+    for (const [label, value] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      list.append(dt, dd);
+    }
+    $("result").hidden = false;
+
+    if (!r.database_saved) {
+      setMessage(r.message + " The photo was saved, but the database record was not.", "bad");
+    } else if (r.status === "one_face") {
+      setMessage(r.message, "ok");
+    } else {
+      setMessage(r.message, "warn");
+    }
+  }
+
+  async function takePhoto(event) {
+    event.preventDefault();
+    const roll = $("roll").value.trim();
+    if (!ROLL_RE.test(roll)) {
+      setMessage("Enter a roll number: letters, digits, '-' and '_' only (up to 32 characters).", "bad");
+      $("roll").focus();
+      return;
+    }
+    const button = $("capture-btn");
+    button.disabled = true;
+    setMessage("Capturing... look at the camera.", "");
+    try {
+      const result = await api("/api/capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roll_number: roll }),
+      });
+      showResult(result);
+      await loadCaptures();
+    } catch (error) {
+      setMessage(error.message, "bad");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function addCell(row, text) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    row.append(td);
+  }
+
+  function showListMessage(text) {
+    const body = $("captures-body");
+    body.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.textContent = text;
+    row.append(cell);
+    body.append(row);
+  }
+
+  async function loadCaptures() {
+    const roll = $("roll").value.trim();
+    const params = new URLSearchParams({ limit: "20" });
+    const filtered = ROLL_RE.test(roll);
+    if (filtered) params.set("roll_number", roll);
+    $("list-caption").textContent = filtered
+      ? `Showing the latest captures for roll number ${roll}.`
+      : "Showing the latest captures for all roll numbers. Type a roll number above to filter.";
+
+    try {
+      const data = await api("/api/captures?" + params.toString());
+      const body = $("captures-body");
+      body.replaceChildren();
+      if (data.captures.length === 0) {
+        showListMessage("No captures yet.");
+        return;
+      }
+      for (const c of data.captures) {
+        const row = document.createElement("tr");
+        addCell(row, formatTime(c.captured_at));
+        addCell(row, c.roll_number);
+        addCell(row, String(c.face_count));
+        addCell(row, LABELS[c.status] || c.status);
+        addCell(row, c.image_path);
+        body.append(row);
+      }
+    } catch (error) {
+      showListMessage("Could not load captures: " + error.message);
+    }
+  }
+
+  $("capture-form").addEventListener("submit", takePhoto);
+  $("refresh-btn").addEventListener("click", loadCaptures);
+  checkDatabase();
+  loadCaptures();
+</script>
+</body>
+</html>
